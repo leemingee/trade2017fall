@@ -1,0 +1,828 @@
+---
+title: "Final Report for NeverGiveUp Team"
+author: "Jinhan Cheng, Ming Li"
+date: "12/15/2017"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_section: true
+    df_print: kable
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+opts_chunk$set(echo = TRUE, eval = TRUE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55), tidy = TRUE)
+Sys.setenv(TZ="America/New_York")
+```
+```{r libraries,include=FALSE}
+library(treemap)
+library(ggplot2)
+library(maptools)
+library(data.table)
+library(plyr)
+library(dplyr)
+library(Hmisc)
+library(DT)
+library(pipeR)
+library(pdftools)
+library(NLP)
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(spacyr)
+library(revealjs)
+library(plot3D)
+```
+```{r functions, include=FALSE}
+# round.numer
+round.numerics <- function(x, digits) { 
+  if (is.numeric(x)) {
+     x <- round(x = x, digits = digits)
+  }
+  return(x) 
+}
+# mean(x, na.rm=TRUE)
+narm.mean <- function(x) { 
+  return(mean(x,na.rm=TRUE))
+}
+# asnumeric
+asnumeric <- function(x){
+  if(is.numeric(x)){
+    x <- as.numeric(x)
+  }
+  return(x)
+}
+# logistic regression
+logistic.regression.summary <- function(glm.mod, digits = 3) {
+  glm.coefs <- as.data.table(summary(glm.mod)$coefficients, keep.rownames = TRUE) 
+  alpha = 0.05
+  z <- qnorm(p = 1 - alpha/2, mean = 0, sd = 1)
+  glm.coefs[, `:=`(Odds.Ratio, exp(Estimate))]
+  glm.coefs[, `:=`(OR.Lower.95, exp(Estimate - z * `Std. Error`))] 
+  glm.coefs[, `:=`(OR.Upper.95, exp(Estimate + z * `Std. Error`))] 
+  setnames(x = glm.coefs, old = c("rn", "Pr(>|z|)"), new = c("Variable", 
+    "p.value"))
+  setcolorder(x = glm.coefs, neworder = c("Variable", "Estimate", "Odds.Ratio", "Std. Error", "z value", "p.value", "OR.Lower.95", "OR.Upper.95"))
+  return(glm.coefs[])
+}
+# linear regression
+linear.regression.summary <- function(lm.mod, digits = 3) { 
+  lm.coefs <- as.data.table(summary(lm.mod)$coefficients, keep.rownames = TRUE) 
+  alpha = 0.05
+  z <- qnorm(p = 1 - alpha/2, mean = 0, sd = 1)
+  lm.coefs[, `:=`(Coef.Lower.95, Estimate - z * `Std. Error`)] 
+  lm.coefs[, `:=`(Coef.Upper.95, Estimate + z * `Std. Error`)] 
+  setnames(x = lm.coefs, old = c("rn", "Pr(>|t|)"), new = c("Variable", 
+    "p.value"))
+  setcolorder(x = lm.coefs, neworder = c("Variable", "Estimate", "Std. Error", "t value","p.value", "Coef.Lower.95", "Coef.Upper.95"))
+  return(lm.coefs)
+}
+# reduce formula
+num.unique <- function(x){
+  unique.values <- unique(x)
+  unique.values <- unique.values[!is.na(unique.values)]
+  len <- length(unique.values)
+  return(len)
+}
+min.above <- function(x, threshold, na.rm = TRUE){
+  the.min <- min(x, na.rm = na.rm)
+  if(the.min > threshold){
+    return(TRUE)
+  }
+  else{
+    return(FALSE)
+  }
+}
+reduce.formula <- function(dat, the.initial.formula, outcome.category.threshold = 2){
+   dat <- as.data.table(dat)
+
+   the.sides <- strsplit(x = the.initial.formula, split = "~")[[1]]
+   the.outcome <- trimws(the.sides[1], which = "both")
+   the.predictors.untrimmed <- strsplit(x = the.sides[2], split = "+", fixed = TRUE)[[1]]
+   the.predictors <- trimws(x = the.predictors.untrimmed, which = "both")
+
+   total.unique <- dat[, lapply(X = .SD, FUN = "num.unique"), .SDcols = the.predictors]
+   includes.variation <- total.unique[, .SD > 1, .SDcols = the.predictors]
+
+   num.unique.outcomes <- dat[, length(unique(get(the.outcome)))]
+
+   if(num.unique.outcomes <= outcome.category.threshold){
+     total.unique.segmented <- dat[, lapply(X = .SD, FUN = "num.unique"), .SDcols = the.predictors, by = the.outcome]
+     measured.in.all.segments <- total.unique.segmented[, lapply(X = .SD, FUN = "min.above", threshold = 0), .SDcols = the.predictors]
+   }
+   else{
+     measured.in.all.segments = pmax(TRUE, includes.variation)
+   }
+   
+   meets.criteria <- pmin(includes.variation, measured.in.all.segments)
+   included.variables <- as.data.table(x = t(meets.criteria), keep.rownames = TRUE)
+   setnames(x = included.variables, old = names(included.variables), new = c("variable", "include"))
+
+   rhs <- paste(included.variables[include == TRUE, variable], collapse = " + ")
+   the.formula <- sprintf("%s ~ %s", the.sides[1], rhs)
+   return(the.formula)
+}
+# Model Fitting Function
+fit.model <- function(dat, the.initial.formula, model.type, digits = 3) {
+    the.formula <- reduce.formula(dat = dat, the.initial.formula = the.initial.formula)
+    if (model.type == "logistic") {
+        mod <- glm(formula = the.formula, family = "binomial", data = dat)
+        mod.summary <- logistic.regression.summary(glm.mod = mod, digits = digits)
+    }
+    if (model.type == "linear") {
+        mod <- lm(formula = the.formula, data = dat) 
+        mod.summary <- linear.regression.summary(lm.mod = mod, digits = digits)
+    }
+    mod.summary.rounded <- mod.summary[, lapply(X = .SD, FUN = "round.numerics", digits = digits)] 
+    return(mod.summary.rounded)
+}
+```
+
+
+
+\newpage
+
+# Introduction: Trade Around the World
+ 
+\par 
+Trade is an whole-world concept, it could be explained by macroeconomics and other economics theory. In our project, we want to investigate and find out the relationship between goods, whether they are complementary or substitute. For example, tea and coffee are substitute goods, customers often buy one kind of them. As for the relationship between milk and tea, or milk and coffee, they could be complementary goods, for those who what to have a bottle of bubble milk tea or like to have a cup of coffee with milk. We can track into the data to find these similar relationship between other goods. After doing this, we could offer some commercial suggestions to companies who sell those products, and to strike a balance between different target customers.
+\par
+We also want to find out the tendency of trading, for example we want to know which product are becoming more popular among international trade, apart from what is universally known, personal digital products for instance. It is important to find some potential commercial opportunities that many companies may ignore.
+\par
+And for a specific country, we are trying to compute its trading structure and to find some potential relationship between other indicators. If the result of our research is strongly concerned with one or more indicators of this country, we could offer suggestions for them to help build a better and healthier society.
+
+# Sources of Data
+
+\par
+We obtain the data from these websites:
+
+## United States Census Bureau
+Firstly, for the main data, we obtain the information about trade volumn between the United States and other countries since year 1996 till now from [*United States Census Bureau*](https://www.census.gov/foreign-trade/statistics/country/sitc/index.html).
+```{r USCB, include = FALSE}
+dat1 <- fread(input="sitc315presdigit.csv", integer64 = "numeric", verbose = FALSE)
+dat2 <- fread(input="sitc39614digit.csv", integer64 = "numeric", verbose = FALSE)
+dat3 <- rbind(dat1,dat2)
+```
+
+## World Trade Organization
+Secondly, for the target goods, we've done some text mining on the reports of [*World Trade Organization*](https://www.wto.org/english/res_e/reser_e/wtr_e.htm). We download reports since year 2007. Each report includes the trading situation of that year and the trade in this globalizing, including the causes, distributional consequences of trade and policy implications of global integration and WTO etc.
+```{r WTO reports, include = FALSE}
+rp.files <- list.files(pattern = "world_trade_report")
+rp.files
+```
+
+## The World Bank Organization
+Finally, we use data from [*The World Bank Organization*](https://data.worldbank.org/indicator). We uses indicators such as the ratio of death caused by communicable diseases and nutrition conditions, GDP per person employed, prevalence of overweight(% of children under 5), prevalence of undernourishment(% of population), wage and salaried female workers(% of female employment), wage and salaried male workers(% of male employment) and the population growth rate.
+\par
+The resourses of data are reliable because they come from reliable data bank. As for accuracy, they mostly meet our standard, besides some of the data has missing value, and the country names for the same country code has different formats. Different data has different responsibility to serve. All of the data offer information about year, the first and the last one provide us with further information about countries. And for the first one, it gives us more about the trading data including. As for the last resourse, it gives us country code, region and income level of a country, and a country's life index. In this way, all sources of data are representative of the population we are studying.
+
+\newpage
+
+# Examination of the Data
+
+## Data obtained from *United States Census Bureau*
+\par
+We check the data and it is of good quality. The data structure is as below:
+```{r raw_data, echo = TRUE}
+colnames(dat3)
+```
+*SITC* includes the goods, and *sitc_sdesc* has the codes for each goods. We use data of the total trade of a year, so we use the *41th* and *42th* columns.
+
+## Data obtained from *World Trade Organization* 
+\par
+As for information obtained from WTO reports, we do some text mining of them. We keep the names of *goods* in our data table and build a simple world cloud of them to serve as a resource for us to target the objectives we want to do research on. 
+\par
+To achieve this, we want to do some text processing of the *goods* we have from *USCB*. Fisrtly we combine each product's name and remove all the punctuation and numbers, at the same time we make them lowercase. Secondly we split the long sentence we've created into short words, then remove those words whose length are less then 3. Thirdly we match the texts we've chosen with the texts from the *WTO* reports and get the frequence table. The result of the whole 11 years since year 2007 is as below:
+```{r text, include = FALSE}
+read <- readPDF(control = list(text = "-layout"))
+text <- Corpus(URISource(rp.files), readerControl = list(reader = read))
+text.p <- TermDocumentMatrix(text,control = list(removePunctuation = TRUE,stopwords = TRUE, tolower = TRUE, stemming = TRUE, removeNumbers = TRUE, bounds = list(local = c(3, Inf))))
+ft <- findFreqTerms(text.p, highfreq = Inf)
+goods <- unique(dat3$sitc_sdesc)
+goods <- tolower(goods)
+goods.p <- sprintf(" %s ", paste(goods, collapse = " "))
+goods.p <- gsub("\\d"," ",goods.p)
+goods.p <- gsub(pattern = "[[:punct:]]", replacement = "", goods.p)
+goods.p <- unique(unlist(strsplit(goods.p,split=" ")))
+goods.p <- goods.p[which(nchar(goods.p) >= 3)]
+goods.p <- sort(goods.p[which(goods.p %in% ft)])
+text.ft <- as.matrix(text.p[goods.p, ])
+text.ft <- cbind(rownames(text.ft),as.data.table(text.ft))
+colnames(text.ft)[1] <- "Term"
+text.ft$Frequence <- rowSums(text.ft[,2:12,by="Term"])
+text.c <- text.ft[,c(1,13)]
+text.clean <- c("paper","oil","food","fuel","water","fish","plant","gas","steel","household","metal","wood","iron","coal","petroleum","footwear","ore","apparel","gold","meat","fruit","aircraft","leather","sugar","cotton","railway","wheat","rice","motor","gluten","cocoa","copper","film","corn","rubber","tobacco","nickel","tea","headgear","milk","cork","silver","cereal","honey","plywood","zinc","platinum","sand","flour")
+text.cleaned <- text.c[text.c$Term %in% text.clean,]
+text.cleaned <- setorderv(text.cleaned, "Frequence", -1)
+rm(text.ft)
+```
+```{r simple wordcloud, fig.align="center", echo = TRUE}
+wordcloud(text.cleaned$Term, text.cleaned$Frequence, random.order=FALSE, scale= c(5, 0.5), colors = brewer.pal(8, "Dark2"))
+```
+\par
+Finally, we choose goods from three categories to inverstigate: cloth, cereal and drinks. The specific goods we want to deal with are as followed:
+```{r keywords, include = FALSE}
+cloth <- c("SILK TEXTILE FIBERS","COTTON TEXTILE FIBERS")
+cereal <- c("WHEAT AND MESLIN, UNMILLED","RICE","BARLEY, UNMILLED","MAIZE (NOT INCLUDING SWEET CORN) UNMILLED","CEREALS, EXCEPT WHEAT, RICE, BARLEY, MAIZE")
+drinks <- c("COFFEE AND COFFEE SUBSTITUTES","COCOA","TEA AND MATE","NONALCOHOLIC BEVERAGES","ALCOHOLIC BEVERAGES","MILK, CREAM, MILK PRODUCTS EXCEPT BUTTER OR CHEES","FRUIT/VEGETABLE JUICES, UNFERMENTED")
+keywords <- c(cloth,cereal,drinks)
+products <- unique(dat3[,.(product=unique(sitc_sdesc)),by=SITC])
+s.cloth <- c("Silk","Cotton")
+s.cereal <- c("Wheat","Rice","Barley","Maize","Other.Cereals") 
+s.drinks <- c("Coffee","Cocoa","Tea","Soft.Drinks","Alcohol","Milk","Juices")
+s.keywords <- c(s.cloth,s.cereal,s.drinks)
+#products$product[grepl(paste(keywords,collapse="|"),products$product)]
+```
+```{r keywords show, echo = TRUE}
+s.keywords
+```
+```{r melt_data, include = FALSE}
+keydat <- dat3[sitc_sdesc %in% keywords]
+# simplify products'names
+for (i in 1:length(keywords)){
+    keydat$sitc_sdesc[keydat$sitc_sdesc==keywords[i]] <- s.keywords[i]
+}
+# delete CIF
+CIF <- colnames(keydat)[grep("CIF",colnames(keydat))]
+keydat[,CIF] <- NULL
+keydat[,c("SITC","CTY_CODE")] <- NULL
+# change colnames
+colnames(keydat) <- gsub("FASValueBasis",".",colnames(keydat))
+colnames(keydat) <- gsub("GenImportsCustomsValBasis","Imports.",colnames(keydat))
+colnames(keydat) <- gsub("YtdDec","Total",colnames(keydat))
+setnames(x = keydat, old = "sitc_sdesc", new = "Product")
+```
+```{r subdat, include =FALSE}
+export.total.keydat <- keydat[,c("Year","Product","Country","Exports.Total")]
+export.total.keydat[,':='(Type,"Export")]
+setcolorder(x = export.total.keydat, neworder = c("Country", "Year", "Product", "Exports.Total","Type"))
+import.total.keydat <- keydat[,c("Year","Product","Country","Imports.Total")]
+import.total.keydat[,':='(Type,"Import")]
+setcolorder(x = import.total.keydat, neworder = c("Country", "Year", "Product", "Imports.Total","Type"))
+#r export_total
+for (i in 1:length(s.keywords)){
+    export.total.keydat[Product==s.keywords[i],':='(s.keywords[i],Exports.Total)]
+}
+#order by country and year
+setorderv(x=export.total.keydat, cols=c("Country","Year"))
+export.total.keydat <- export.total.keydat[,-c("Product","Exports.Total")]
+#r clean year
+n.export.total.keydat <- export.total.keydat[, lapply(X = .SD, FUN = "narm.mean"), .SDcols =s.keywords, by=c("Country","Year","Type")]
+# clean NAs
+n.export.total.keydat[is.na(n.export.total.keydat)==TRUE] <- 0
+# import_total
+for (i in 1:length(s.keywords)){
+    import.total.keydat[Product==s.keywords[i],':='(s.keywords[i],Imports.Total)]
+}
+#order by country and year
+setorderv(x=import.total.keydat, cols=c("Country","Year"))
+import.total.keydat <- import.total.keydat[,-c("Product","Imports.Total")]
+#r clean year
+n.import.total.keydat <- import.total.keydat[, lapply(X = .SD, FUN = "narm.mean"), .SDcols =s.keywords, by=c("Country","Year","Type")]
+# clean NAs
+n.import.total.keydat[is.na(n.import.total.keydat)==TRUE] <- 0
+# export&import_total
+total.keydat <- rbind(n.export.total.keydat,n.import.total.keydat)
+rm(export.total.keydat,import.total.keydat,n.export.total.keydat,n.import.total.keydat)
+# rm problematic country
+total.keydat <- total.keydat[Country!="4799" & Country!="4802"]
+```
+
+## Data obtained from *The World Bank Organization*
+\par
+Each of the data of the indicators includes 3 data files, one is the main data, one is a description of the country including its region and income level, the last one is just an introduction. We use only the first two data files. When examining these data, our main concern is that there exist some missing values when we decide to directly merge the first with the second data(later we will talk about merge it with data from *USCB*). Most country names in these two data files share the same formats, some of them are written in different ways however. So we merge them using country code instead because code are more universally used and can shared by different formats of names. After this, we've gained data structure like this:
+```{r total.keydat, echo = TRUE}
+colnames(total.keydat)
+```
+\par
+When merging with the data we gain from *USCB*, another problem is that there are no country codes in it, and also some country names are written in different ways from *WBO*. To deal with this problem we decide to do text processing using grep function. For example, there are *WorldTotal* in *USCB* data and *World* in *WBO* data, we use text processing to match them and add the related country code to the former data. After this, the data structure has become like this:
+```{r population_growth, include = FALSE}
+dat4 <- fread(input="Population.Growth.csv")
+setorderv(dat4,"Country Name")
+dat5 <- fread(input="Region_IncomeGroup1.csv")
+setorderv(dat5,"TableName")
+dat4 <- dat4[`Country Code` != dat4$`Country Code`[which(dat4$`Country Code` %nin% dat5$`Country Code`)]]
+# country code from world bank
+Country <- dat3[,.(Country=unique(Country))]
+Country.Code <- rbind(dat4[,.(Country=`Country Name`),by="Country Code"],dat5[,.(Country=TableName),by="Country Code"])
+Country.Code <- Country.Code[,.(Country=unique(Country)),by="Country Code"]
+# add county code to Country
+Country[Country %in% Country.Code$`Country`,`:=`("Country Code", Country.Code$`Country Code`)]
+# find country
+add1 <- Country$Country[grepl(paste(Country.Code$Country[Country.Code$Country %nin% Country$Country],collapse="|"),Country$Country)]
+add2 <- Country.Code$Country[grepl(paste(Country$Country[Country$Country %nin% Country.Code$Country],collapse="|"),Country.Code$Country)]
+add11 <- Country.Code[,grep(Country,add1)!=0,by=Country]
+add11 <- Country.Code[Country %in% add11$Country,`Country Code`,by=Country]
+add11 <- add11[,':='(Country1,add1)]
+Country[Country %in% add11$Country1, ':='("Country Code",add11$`Country Code`)]
+add22 <- Country[Country %nin% Country.Code$Country,grep(Country,add2)!=0,by=Country]
+add2 <- Country.Code[Country %in% add2,`Country Code`,by=Country]
+add22 <- add2[,':='(Country1,add22$Country)]
+Country[Country %in% add22$Country1, ':='("Country Code",add22$`Country Code`)]
+# add country code for total.keydat
+total.keydat <- merge(total.keydat,Country,by="Country",all = FALSE)
+dat5[dat5==""] <- NA
+total.keydat <- merge(total.keydat,dat5[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Region","IncomeGroup")],by="Country Code",all = FALSE)
+# clean spare data
+rm(add1,add2,add11,add22)
+```
+```{r total.keydat_new, echo = TRUE}
+colnames(total.keydat)
+```
+\newpage
+
+# Investigation and Interpretation
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.pos = 'H')
+```
+```{r initialization, echo = F,eval = T, warning = F}
+input_data =  read.csv("mydata.with.region.csv",header = T,as.is = T)
+input_data = input_data[!is.na(input_data$longitude),]
+input_data = input_data[input_data$value != 0,]
+input_data[!is.na(input_data$Commodity_Name) & input_data$Commodity_Name == "COCOA",10] = "Cocoa"
+#Load the data for Google motion data
+country<-read.csv("country.cleaned.csv")
+# force all values in country dataset to be numeric
+for (i in 3:15){
+  country[,i]<-as.numeric(country[,i])
+}
+
+data(wrld_simpl) # Basic country shapess
+
+bgcolor = "#000000"
+arc_colors = c("#ffdbdb","#c4e0ff","#e8fff0","#ffe9bf","pink","orange")
+map_pal = data.frame(AnnualAggregate = c("red"),Chocolate = c("blue"),Coffee = c("green"),COCOA = c("#ffe9bf"),Spices = c("pink"),Tea = c("orange"))
+names(map_pal)[1] = "Annual Aggregate"
+
+
+cluster_data_import = read.csv("clustering.import.csv")
+code = read.csv('https://raw.githubusercontent.com/plotly/datasets/master/2014_world_gdp_with_codes.csv')[,c(1,3)]
+
+# sample_data <- read.csv("sample.total.csv")
+
+
+link <- "world_trade_report17_e.pdf"
+
+# word <- read.csv("common.words.0317.csv")
+input <- vector()
+input$number_clusters = 5
+input$year_cluster = 2017
+
+```
+
+## Data Visualization
+
+### Globe Panels
+As the data has many dimensions in countries and the products, so the first thing we need to do is to get a more explicit visualization of the data. Inspired by the data visualization example in $Beautiful Data$ book, we decided to combine the spacial data with the trade data, then using an embedded JavaScript script to power the interactive part. 
+ 
+```{r}
+kable(head(input_data[1:7],3))
+```
+
+From the chart above, we can see that we combine the basic spacial data, i.e. the longitute and latitude value to each country and then use the points for plot of lines connects between countries.
+\par
+Thanks to Javascript supported shiny app, we are able to see when it comes to the specific trade type( Expoer or Import) for some specific product, the top largest trade partner for one specific year. From the rotatable 3D Globe in the Panel, we can clearly find which countries are the largest trade partners with USA and the spacial distributions when comes to different  products in different year, which also lays the foundation for the exploratory modelling of the data. 
+
+As that API can be knitr out, so I just put a screenshot here.
+
+![3D Globe Panel, powered by Google Map API](3dglobe.png)
+
+![2D Globe Panel, powered by Leaflet Map Library](2dglobe.png)
+
+Besides the data visualization of 3D globe, to have a more convenient and more perspicuous review of the trade record, we decide to split the data for different trade levels, then show them on plain map of the world.
+\par
+Thanks to [leaflet](http://leafletjs.com/) library is support by Shiny App's JavaScript version, we are able to easily deploy this Panel just by downloading the R version of leaflet library and deploy it into our app. As the above chart shows, we have the spacial data assigned for each country, so we make use of the spacial data again and mark the different countries with different Dollar signs.
+\par
+We now have a general sense of the trade, and how the proportions of different products distributes around the world. So we will introduce the more numeric way of data analysis: Market Share analysis and the Clustering Analysis.
+
+### Market Share
+
+From the globe panels, we can get a general insights for the trade numbers, but to be more precisely, here comes to the summarize numbers. One of the most used statistics in trade report is the market share, namely, how much proportion for each country's product has in the total trade sum worldwide.
+\par
+Thanks to the powerful R packages again, here we use the treemap package to plot the market share plot. From the areas of the squares, we can easily judge which country plays a important role in the trade.
+
+```{r, market share, echo = TRUE}
+input$year_tree = 2017
+input$number_countries_tree = 15
+input$com_tree = "Rice"
+input$type = "Import"
+```
+
+```{r, fig.align="center", include = FALSE}
+  sub_country<-country[country$Year==input$year_tree,]
+    sub_country[sub_country$Country == "WorldTotal", ][, 3:length(sub_country)] <- 0
+    sub_country[nrow(sub_country)+1,3:length(sub_country)] <- colSums(sub_country[,3:length(sub_country)])
+    for(i in 3:length(sub_country)){
+      sub_country[,i]<-sub_country[,i]/sub_country[nrow(sub_country),i]
+    }
+    sub_country<-sub_country[1:nrow(sub_country)-1, ]
+    sub_country$label<-paste(sub_country$Country,", ",round(100*sub_country[,as.character(input$com_tree)]),"%",sep="")
+    treemap(sub_country, index='label', vSize=input$com_tree, 
+            vColor="Country", type="categorical", 
+            palette="RdYlBu",aspRatio=30/30,
+            drop.unused.levels = FALSE, 
+            position.legend="none")
+
+```
+
+From these we obtain some interesting insights. In the other hand, some well-known conclusion seems to have changed as time passed. In our childhood, we all know the rice export is one of the most trade income source for China, but from the data it seems the time has changed. When we verify the conclusion online for more detailed data, it appears that Thailand and India has much more market share as for Rice when it comes to trade with USA.
+\par
+So we want to have a more closer look at the trade numbers, how much gap it has for different countries' market share, so we also conclude a ggplot into the Market share Panel.
+
+```{r, warning=FALSE, include=FALSE, fig.align="center"}
+    temp = input_data
+    temp = subset(temp,Commodity_Name == as.character(input$com_tree))
+    temp[temp$Country == "WorldTotal", ][, "value"] <- 0
+    temp = subset(temp,Year == as.integer(input$year_tree))
+    temp = subset(temp,type == as.character(input$type))
+    temp = arrange(temp,desc(value))[1:input$number_countries_tree,]
+    index = match(input$commodity_3D,c('Annual Aggregate','Chocolate', 'Coffee','Cocoa','Spices','Tea'))
+    maxValue = log(max(temp$value))
+
+
+#     map_palette = map_pal[,index]
+#     clrs = rep('#050505', length(wrld_simpl$NAME))
+#     names(clrs) = wrld_simpl$NAME
+#     clrs[temp$Country] = alpha(map_palette[1], log(temp$value)/maxValue*0.1)
+
+
+#     map_palette = map_pal[,index]
+#     clrs = rep('#050505', length(wrld_simpl$NAME))
+#     names(clrs) = wrld_simpl$NAME
+#     clrs[temp$Country] = alpha(map_palette[1], log(temp$value)/maxValue*0.1)
+    ##### end subset
+    
+    g = ggplot(data = temp, aes(x = Country, y = value))+
+      geom_bar(stat='identity',position = "dodge")+
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, color = "black")) +
+      theme(legend.position="none") + 
+      theme(legend.background = element_rect(),
+            panel.grid.major.y = element_blank(), 
+            panel.grid.minor.y = element_blank(), 
+            panel.grid.major.x = element_blank(), 
+            panel.grid.minor.x = element_blank())+ 
+      geom_bar(stat = "identity", aes(fill=temp$value))+
+      scale_fill_gradient(low = "#c12a2a", high = "#c12a2a")+
+      scale_x_discrete(limits = temp$Country) 
+    g
+```
+
+### Clustering Analysis
+
+```{r, clustering table, echo = TRUE}
+    input$number_clusters = 5
+    input$year_cluster = 2017
+```
+
+```{r, include = FALSE}
+    k=input$number_clusters
+    newcountry <- country[country$Year==input$year_cluster,]
+    newcountry<-na.omit(newcountry)
+    newcountry1<-newcountry[,3:length(newcountry)]
+    cls_result<-kmeans(newcountry1,k)
+    newcountry1$cluster = cls_result$cluster
+    by_clust = group_by(newcountry1,cluster)
+    by_clust = as.data.frame(summarise(by_clust, 
+                                       mean(Coffee),
+                                       mean(Tea), 
+                                       mean(Cotton), 
+                                       mean(Silk), 
+                                       mean(Cocoa),
+                                       mean(Maize),
+                                       mean(Wheat),
+                                       mean(Rice),
+                                       mean(Barley),
+                                       mean(Other.Cereals),
+                                       mean(Alcohol),
+                                       mean(Milk),
+                                       mean(Juices)
+                                       ))
+    by_clust[,2:length(by_clust)] = t(apply(by_clust[, 2:length(by_clust)],1,log))
+    names(by_clust) = c("by_cluster",
+                        "Magitude(Of Coffee)",
+                        "Magitude(Of Tea)",
+                        "Magitude(Of Cotton)",
+                        "Magitude(Of Silk)",
+                        "Magitude(Of Cocoa)",
+                        "Magitude(Of Maize)",
+                        "Magitude(Of Wheat)",
+                        "Magitude(Of Rice)",
+                        "Magitude(Of Barley)",
+                        "Magitude(Of Other.Cereals)",
+                        "Magitude(Of Alcohol)",
+                        "Magitude(Of Milk)",
+                        "Magitude(Of Juices)"
+                        ) 
+    table2<-cbind(data.frame(Cluster = unique(cls_result$cluster)),data.frame(Size = cls_result$size),by_clust[,2:length(by_clust)])
+    table2<-round(table2,1)
+    #create row names for "table2"
+    name_table2<-c()
+    for(i in 1:nrow(table2)){
+      name_table2<-c(name_table2,paste("cluster means",i,sep = " "))
+    }
+    rownames(table2)=name_table2
+    table2<-table2[order(table2[,1]),]
+    kable(table2)
+```
+
+Here, we use the simplest clustering method, Kmeans Clustering, which is also deployed by the R function $kmeans(data, centers)$. 
+\par
+K Means Clustering is an unsupervised learning algorithm that tries to cluster data based on their similarity. Unsupervised learning means that there is no outcome to be predicted, and the algorithm just tries to find patterns in the data. In k means clustering, we have the specify the number of clusters we want the data to be grouped into. The algorithm randomly assigns each observation to a cluster, and finds the centroid of each cluster. Then, the algorithm iterates through two steps:
+
+1. Reassign data points to the cluster whose centroid is closest.
+2. Calculate new centroid of each cluster.
+
+These two steps are repeated till the within cluster variation cannot be reduced any further. The within cluster variation is calculated as the sum of the euclidean distance between the data points and their respective cluster centroids.
+
+
+By Clustering, we can see which countries plays the most important role, and which plays the less important role in the trade game. From this part, we can decrease the perdictor variables of the linear model in the next part. Also, we can reclean the data by deleting the smartest proportion countries and the model more clear.
+
+\newpage
+
+## Modelling
+
+```{r add population growth into total.keydat, include = FALSE}
+# choose years in dat4 and merge
+dat4 <- dat4[,c("Country Name","Country Code","1996":"2016")]
+rdat4 <- melt(data=dat4, id.vars=c("Country Name","Country Code"), variable.name="Year", value.name="Population.Growth", value.factor=FALSE)
+rdat4[,Year := as.numeric(as.character(Year))]
+rdat4[,Population.Growth := as.numeric(Population.Growth)]
+rdat4[`Country Code`=="USA",':='(P.G.U.S, Population.Growth), by=Year]
+rdat4[,P.G.U.S := mean(P.G.U.S, na.rm = TRUE), by=Year]
+total.keydat <- merge(total.keydat,rdat4[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","Population.Growth","P.G.U.S")],by=c("Country Code","Year"), all=FALSE)
+setorderv(total.keydat,c("Country","Year"))
+```
+```{r introduce unnourishment,overweight,death,Income_Gender,GDP_per, include = FALSE}
+undernourishment <- fread(input="Undernourishment.csv")
+overweight <- fread(input="Overweight.csv")
+death <- fread(input="Cause_of_Death_by.csv")
+income_male <- fread(input="Income_Male.csv")
+income_female <- fread(input="Income_Female.csv")
+gdp_p <- fread(input="GDP_Per_Person.csv")
+```
+```{r undernourishment, include = FALSE}
+# choose data from 1996-2016
+undernourishment <- undernourishment[,c("Country Code","1996":"2016")]
+undernourishment <- melt(data=undernourishment, id.vars="Country Code", variable.name="Year", value.name="Undernourishment", value.factor=FALSE)
+undernourishment[,Year := as.numeric(as.character(Year))]
+undernourishment[,Undernourishment := as.numeric(Undernourishment)]
+undernourishment[`Country Code`=="USA",':='(U.N.U.S, Undernourishment), by=Year]
+undernourishment[,U.N.U.S := mean(U.N.U.S, na.rm = TRUE), by=Year]
+```
+```{r other, include = FALSE}
+# overweight
+overweight <- overweight[,c("Country Code","1996":"2016")]
+overweight <- melt(data=overweight, id.vars="Country Code", variable.name="Year", value.name="Overweight", value.factor=FALSE)
+overweight[,Year := as.numeric(as.character(Year))]
+overweight[,Overweight := as.numeric(Overweight)]
+overweight[`Country Code`=="USA",':='(O.W.U.S, Overweight), by=Year]
+overweight[,O.W.U.S := mean(O.W.U.S, na.rm = TRUE), by=Year]
+# death
+death <- death[,c("Country Code","1996":"2016")]
+death <- melt(data=death, id.vars="Country Code", variable.name="Year", value.name="Death", value.factor=FALSE)
+death[,Year := as.numeric(as.character(Year))]
+death[,Death := as.numeric(Death)]
+death[`Country Code`=="USA",':='(D.U.S, Death), by=Year]
+death[,D.U.S := mean(D.U.S, na.rm = TRUE), by=Year]
+# income_male
+income_male <- income_male[,c("Country Code","1996":"2016")]
+income_male <- melt(data=income_male, id.vars="Country Code", variable.name="Year", value.name="Income_Male", value.factor=FALSE)
+income_male[,Year := as.numeric(as.character(Year))]
+income_male[,Income_Male := as.numeric(Income_Male)]
+income_male[`Country Code`=="USA",':='(I.M.U.S, Income_Male), by=Year]
+income_male[,I.M.U.S := mean(I.M.U.S, na.rm = TRUE), by=Year]
+# income_female
+income_female <- income_female[,c("Country Code","1996":"2016")]
+income_female <- melt(data=income_female, id.vars="Country Code", variable.name="Year", value.name="Income_Female", value.factor=FALSE)
+income_female[,Year := as.numeric(as.character(Year))]
+income_female[,Income_Female := as.numeric(Income_Female)]
+income_female[`Country Code`=="USA",':='(I.F.U.S, Income_Female), by=Year]
+income_female[,I.F.U.S := mean(I.F.U.S, na.rm = TRUE), by=Year]
+# gdp_per_person
+gdp_p <- gdp_p[,c("Country Code","1996":"2016")]
+gdp_p <- melt(data=gdp_p, id.vars="Country Code", variable.name="Year", value.name="GDP.per.person", value.factor=FALSE)
+gdp_p[,Year := as.numeric(as.character(Year))]
+gdp_p[,GDP.per.person := as.numeric(GDP.per.person)]
+gdp_p[`Country Code`=="USA",':='(Gdp.P.U.S, GDP.per.person), by=Year]
+gdp_p[,Gdp.P.U.S := mean(Gdp.P.U.S, na.rm = TRUE), by=Year]
+```
+```{r merge and set order, include = FALSE}
+total.keydat <- merge(total.keydat,undernourishment[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","Undernourishment","U.N.U.S")],by=c("Country Code","Year"), all=FALSE)
+total.keydat <- merge(total.keydat,overweight[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","Overweight","O.W.U.S")],by=c("Country Code","Year"), all=FALSE)
+total.keydat <- merge(total.keydat,death[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","Death","D.U.S")],by=c("Country Code","Year"), all=FALSE)
+total.keydat <- merge(total.keydat,income_male[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","Income_Male","I.M.U.S")],by=c("Country Code","Year"), all=FALSE)
+total.keydat <- merge(total.keydat,income_female[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","Income_Female","I.F.U.S")],by=c("Country Code","Year"), all=FALSE)
+total.keydat <- merge(total.keydat,gdp_p[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","GDP.per.person","Gdp.P.U.S")],by=c("Country Code","Year"), all=FALSE)
+setorderv(total.keydat,c("Country","Year"))
+# new_order
+setcolorder(x = total.keydat, neworder = c("Country Code", "Year", "Country", "Region", "IncomeGroup", "Type", "Silk", "Cotton", "Wheat", "Rice", "Barley", "Maize", "Other.Cereals", "Coffee", "Cocoa", "Tea", "Soft.Drinks", "Alcohol", "Milk", "Juices", "Population.Growth", "Undernourishment", "Overweight", "Death", "Income_Male", "Income_Female", "GDP.per.person", "P.G.U.S", "U.N.U.S", "O.W.U.S", "D.U.S", "I.M.U.S", "I.F.U.S", "Gdp.P.U.S"))
+```
+\par
+To inverstigate our questions, firstly we add several indicators into our main data, as we have talked about in the introduction part. The data structure then becomes like this:
+```{r new_colnames, echo = TRUE}
+colnames(total.keydat)
+```
+\par
+The explanation of the columns we've added is as below:
+*Death* stands for death rates under communicable diseases and nutrition conditions, *P.G.U.S* stands for population growth rate in the United States, *U.N.U.S* stands for prevalence of undernourishment(% of population) in the United States, *O.W.U.S* stands for prevalence of overweight(% of children under 5) in the united states, *D.U.S* stands for death rates under communicable diseases and nutrition conditions in the United States, *I.M.U.S* stands for wage and salaried male workers(% of male employment) in the United States, *I.F.U.S* stands for wage and salaried female workers(% of female employment) in the United States, *Gdp.P.U.S* stands for GDP per person employed in the United States.
+\par 
+Secondly, we build some models and decide to do linear regression of them. When building our model, we use ratios rather than real sizes of trade. We originally used the real sizes of trading in our model, and the results were not good, after consideration we turned to look at ratios because ratios are more operable while the real numbers are enormous and hard to handle. Suppose that the volumn of import and export equals to what has been consumed in reality, these ratios could serve as the structures of what percentage a country would consume certain goods in certain category. Specifically for a certain category, the ratio is the volumn of trade of one goods out of the total volumn of trade of all the goods in that category. For example, the ratio of *cotton* equals to \begin{equation} \frac{cotton}{cotton+silk} \end{equation} 
+```{r ratio.keydat, include =FALSE}
+ratio.keydat <- total.keydat[,c(2:34)]
+ratio.keydat[,':='(sum.cloth,Silk+Cotton)]
+ratio.keydat[,':='(sum.cereal,Wheat+Rice+Barley+Maize+Other.Cereals)]
+ratio.keydat[,':='(sum.drinks,Coffee+Cocoa+Tea+Soft.Drinks+Alcohol+Milk+Juices)]
+ratio.keydat[,':='(Silk,Silk/sum.cloth)]
+ratio.keydat[,':='(Cotton,Cotton/sum.cloth)]
+ratio.keydat[,':='(Wheat,Wheat/sum.cereal)]
+ratio.keydat[,':='(Rice,Rice/sum.cereal)]
+ratio.keydat[,':='(Barley,Barley/sum.cereal)]
+ratio.keydat[,':='(Maize,Maize/sum.cereal)]
+ratio.keydat[,':='(Other.Cereals,Other.Cereals/sum.cereal)]
+ratio.keydat[,':='(Coffee,Coffee/sum.drinks)]
+ratio.keydat[,':='(Cocoa,Cocoa/sum.drinks)]
+ratio.keydat[,':='(Tea,Tea/sum.drinks)]
+ratio.keydat[,':='(Soft.Drinks,Soft.Drinks/sum.drinks)]
+ratio.keydat[,':='(Alcohol,Alcohol/sum.drinks)]
+ratio.keydat[,':='(Milk,Milk/sum.drinks)]
+ratio.keydat[,':='(Juices,Juices/sum.drinks)]
+```
+
+
+### Model Overweight (Export)
+
+We've built a very interesting model for the prevalence of *overweight* of children under 5. Firstly we introduce *region*, *income group*, *population growth*, *year*, *cereal*, *drinks* into our variables. We've found only *region*, *population growth* and *tea* to be statistically significant. Then we keep those variables in our model, the result is as followed: 
+```{r model Overweight~Region+Population.Growth+Tea   (Export), echo =TRUE}
+overweight.formula <- " Overweight ~ Region + Population.Growth + Tea"
+overweight.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = overweight.formula, model.type = "linear")
+kable(overweight.model)
+```
+
+Looking at the table, we could see that *region Europe & Central Asia*, *region Middle East & North Africa*, *region South Asia* are statistically significant, so we assume that if a baby is born in *Europe*, *Central Asia*, *Middle East* and *North Africa* region, he or she has higher probability to be overweight when he or she grows older. If a baby is born in *South Asia* region, he or she has lower probability to suffer from overweight as he or she turns older. And *population growth* is also statistically significant, it has negative correlationship with the prevalence of *overweight*. As for foods and drinks, we first believe that people's main *cereal* may affect the prevalence of *overweight*, however the former result shows that they are not statiscally significant, and there might be some other reasons. As for *drinks*, only the ratio of *tea* is statistically significant, which is opposite to our intuition. Scientists often think *tea* to be a kind of drink that is good for human's health, however in our result, the more ratio you consume *tea*, prevalence of *overweight* in children under 5 is more likely to happen than any other factors in our model.
+
+To interpret this unusual result, we have two ways. For the first one, we think that it is not appropriate to put *tea* in our model if we don't know the consuming structure of *tea* for children under 5, and a child is not like to be allowed to drink tea because he or she is too young. Also, the stand error of the coefficient is very large, it's not proper to put *tea* in our model. For the second one, we suppose that the prevalence of *overweight* is approximately the same within each age level, and we assume that most people drink *tea* together with high heat foods such as sugar and cream. For example,*bubble milk tea* is very popular among teenagers and it turns out to be a kind of unhealthy drink.
+```{r plot overweight&tea, echo = TRUE}
+plot(ratio.keydat$Tea,ratio.keydat$Overweight)
+```
+
+We then plot the *tea* ratio and prevalence of *overweight*, from the result we could see that it is not suitable to put *tea* in our model.
+
+### Model Death (Export)
+
+When building our model for *death* rate under communicable diseases and nutrition conditions, we first introduce variables including *region*, *income group*, *cereals* and *drinks*. The result is not good because both items in *cereals* and *drinks* are not statistically sigificant though we thought they would have some significant effect on our model. Then we remove those facotrs from our model and the result is as below:
+```{r model Death~Region+IncomeGroup+Coffee+Cocoa+Tea+Soft.Drinks+Alcohol+Milk+Juices (Export)}
+death.formula <- "Death ~ Region + IncomeGroup"
+death.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = death.formula, model.type = "linear")
+kable(death.model)
+```
+
+From the table above we could see that: *region Europe & Central Asia*, *region South Asia*, *region Sub-Saharan Africa*, *low income group*,*lower middle income group* are statistically significant. For *region*, if you live in *Europe* and *Central Asia* area, you are less exposed to death under communicable diseases and nutrition conditions than *South Asia* and *Sub-Saharan Africa* area. We assume that *World Health Organization* should take action to do more research on people's health of these areas. As for income group, *lower income* group should be more taken care of because they have high potential to suffer from communicable diseases and bad nutrition conditions.
+
+### Model Undernourishment (Export)
+
+We've built a model for the prevalence of *undernourishment*. We introduce variables including *region*, *income group*, *cereals*. We remove *income group* in our model because it raises some perplexing result. The result of linear regression is as followed:
+```{r model Undernourishment~Region+Wheat+Rice+Barley+Maize+Other.Cereals (Export)}
+undernourishment.formula <- "Undernourishment ~ Region + Wheat + Rice +Barley + Maize + Other.Cereals"
+undernourishment.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = undernourishment.formula, model.type = "linear")
+kable(undernourishment.model)
+```
+
+As we can see in the table, *region Europe & Central Asia*, *region Middle East & North Africa*, *region South Asia*, *region Sub-Saharan Africa*, *wheat*, *rice*, *barley* are all statistically significant. As for region, the prevalence of *undernourishment* is severe in *South Asia* and *Sub-Saharan Africa* region. And as for *cereals*, consuming more cereal in *wheat* and *rice* will reduce the prevalence of *undernourishment*, we assume that eating them would provide much more energy than *barley* for human's body, and we think that it is a very good topic for biologists to do research on. In the meantime, we also suggest organizations suchs as *World Health Organization*  and *Red Cross* to take action on helping reduce the prevalence of *undernourishment* in these areas, maybe introducing cereals like *wheat* and *rice* in their consuming structure would work.
+
+### Model goods
+
+#### Model Coffee (Export)
+We've built a model for the ratio of *coffee*, adding variables such as *region*, *income groups*, *income* by different *genders*, and *population growth*. The result of the linear regression is interesting: the effect of *region* and *population growth* are not statistically significant, which means these two are not likely to affect the ratio of *coffee* in a consuming structure. Also the effect of *income* growth of *male* is not statistically significant. We remove the factors of *region* and *population growth* out of  our model and the result is as followed.
+```{r model Coffee~IncomeGroup+Income_gender  (Export), echo = TRUE}
+Coffee.formula <- " Coffee ~ IncomeGroup + Income_Female + Income_Male"
+Coffee.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = Coffee.formula, model.type = "linear")
+kable(Coffee.model)
+```
+
+All of the *income group* have positive correlationships with the ratio of *coffee*. The *income* growth of *female* would have positive affect on the ratio of coffee from our investigation. Now we could suppose that the consuming of coffee is very populatio among any level of income groups. And female is a very stable resouce of the consuming of coffee. 
+\par
+Our assumption is that, if a coffee company invest more into making advertisement to attract the attention of female consumers, it will gain more money. For example, Starbucks put on new and decorative wrap of their coffee cups when there come Christmas and other holidays, many female consumers buy coffee and take selfies with the lovely cups, that must increase their turnover. However, we do suggest that those coffee company invest a little on exploring male customers, because male are also a large potential cash pool.
+
+#### Model Tea (Export)
+Now let's take a look at one of the substitute goods of *coffee*, *tea*. There is a model for the ratio of *tea*, we add variables including *region*, *income groups*, *income* by different *genders*, and *population growth*. Like what we've seen in *coffee* model, *population growth* is not statistically significant. However, *income groups* is not statistically significant in this model, and some *region* is significant. Removing *income groups* and *population growth* out of our model, the result is as below: 
+```{r model Tea~Region+IncomeGroup+GDP.p+Income_gender  (Export), echo = TRUE}
+Tea.formula <- " Tea ~ Region + Income_Female + Income_Male"
+Tea.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = Tea.formula, model.type = "linear")
+kable(Tea.model)
+```
+
+As we can see in the table, *region Middle East & North Africa* and *region Sub_Saharan Africa* are statistically significant and so are *income* growth with both *female* and *male*. Both these two regions have positive correlationships with the ratio of *tea*, we suggest that tea companies make more trade with these two regions. As for *income* growth with different genders, when the salary of a *female* increases, she has the tendency of consuming less tea in her drinking structure, maybe she will buy more coffee as we have assumpted before. When the salary of a *male* increases, he is more likely to buy more *tea* drinks. 
+\par
+Like what we have talked before, we think *tea* and *coffee* companies should focus more on gender problems and make different target consumers. At the same time we encourage them to invest a little on exploring new customers.
+
+#### Model Milk (Export)
+We've built another model for trade volumn of *Milk*, we consider it to be one of the supplementary goods. So in this model we use the real volumn of trade in our model. To simplify the formula we introduce only *coffee* and *tea* as the variables. And the result is as below:
+```{r model Milk~Region+IncomeGroup+GDP.p+Income_gender  (Export from US), echo = TRUE}
+Milk.formula <- " Milk ~ Coffee + Tea"
+Milk.model <- fit.model(dat = total.keydat[Type=="Export",], the.initial.formula = Milk.formula, model.type = "linear")
+kable(Milk.model)
+```
+
+As we can see in the table, both *coffee* and *tea* are statistically significant. As for correlationships, *coffee* is negative and *tea* is positive. We assume that the increaing trade volumn of *tea* would accompany the increasing trade volumn of *milk*, for example, *bubble milk tea* is quite popular among teenagers. However when we increase the export of *coffee*, we may export less *milk*, though we previously thought *coffee* and *milk* are good mate. And we've make a 3D plot for the trading volumn of these three goods.
+```{r plot3d Milk,Coffee,Tea, fig.align="center", echo = TRUE}
+scatter3D(x = total.keydat$Coffee, y = total.keydat$Milk, z = total.keydat$Tea, xlab = "Coffee", ylab = "Milk", zlab = "Tea", pch=16, cex=1.0, clab = "Trade Volumn", theta = 10, d = 2,colkey = list(length = 0.5, width = 0.3, cex.clab = 0.75))
+```
+
+#### Model Silk (Export)
+We build the model of the ratio of *silk*. We don't build a model for cotton because in the consuming structure of cloth these are only two kinds of goods: *cotton* and *silk*. When we gain a conclusion of one goods, it's not hard to gain the other. We originally introduce variables including *region*, *income groups*, *population growth*, *GDP per person*, and *income* by different genders. However the first 3 factors are not statistically significant in the result, then we remove them from our model. The result of linear regression is as below:
+```{r model SilkvsCotton~GDP.per.person+Income_Female+Income_Male (Export) }
+Silk.formula <- "Silk ~ GDP.per.person + Income_Female + Income_Male"
+Silk.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = Silk.formula, model.type = "linear")
+kable(Silk.model)
+```
+
+We could see from the table that: *GDP per person* and *income* growth with *male* are statistically significant, however the coefficient of the former one is 0. And for *male*, he is likely to consume more silk product when his salary increases. Though we don't know whether a man buys silk product for himself or not, we do make the assumption that a company that sells *silk* products should focus mainly on appealing *male* customers.
+
+#### Model Silk (Import)
+We build a similar model for *silk* ratio, and it is for goods import. However there is no variable that is statistically significant in the result. 
+```{r model SilkvsCotton~GDP.per.person+Income_Female+Income_Male (Import) }
+Silk.us.formula <- "Silk ~ Gdp.P.U.S + I.F.U.S + I.M.U.S"
+Silk.us.model <- fit.model(dat = ratio.keydat[Type=="Import",], the.initial.formula = Silk.us.formula, model.type = "linear")
+kable(Silk.us.model)
+```
+
+# Limitations and Uncertainties
+
+1. We apply general linear regression models to all countries. However different countries have their own economics structures, a general function is not valid to all of them. At the same time, we only have limited data of years, we can hardly build a suitable specialized model for a certain country using the available data.
+
+2. Secondly, there are lots of missing values in the dataset. For missing values in data obtained from *WBO*, we assign *NA* for them because there is no way to fill in the blank of a missing *income group* and *region*. As for missing value in data obtained from *USCB*, we assign *0* value for them. We only have no more than 200 effective countries in the former data after we cleaned them. As for the latter one, we find some points gathering together around the value of *0* when we plot the data. We don't know whether it's the best way to deal with those missing values. And also, lack of data is a very serious limitation in our project.
+
+3. Thirdly, we focused mainly on exports, our model mainly present the effect of consuming goods from the United States. However we don't know how much United States' goods contribute to their consuming structure and the results are not quite convincing. At the meantime, we have only used data of sixteen years, which is not enough to model the consuming structure and other indicators for a single country, and the results of linear regressions are not good for the United States as a consequence, so we haven't talked much about model for *Import* in the report.
+
+4. Finally, we assume that the consumption of a certain goods equals to the trade volumn of it. We don't know whether they truly consume them in one year or some goods may be stored for years.
+
+
+# Areas of Future Inverstigation
+
+## Variable Selection for Linear Models
+We have introduced some variables in this project, including $14$ kinds of goods traded between $247$ countries, as well as $6$ data dimensions including indicators obtained from *WBO*. For each model, we have options for several predictor variables, and we can further use Lasso method to decrease the number of predictor variables and make our models much more clear and statistically significant.
+
+## Economical Models Validation
+As we become more interested in digging out our own insights from the data, we haven't pay much attention to the wellknown macroeconomic models on textbooks. With these multi-dimensional and time-series data on trade, we can easily apply the models to data and valid the models. As the outcome is quite significant, we haven't spend much time on that in the process.
+
+## More Profound Text Mining
+When it comes to trade, there are much information presented by news, trade reports and policy files, which requires the text mining techs to play with them. Even though in this project we did the text mining part and draw some conclusion including what's the mostly mentioned products in the annual trade report, it still has long way to go for the text processing part. Following are some of Ming's ambitions and plans for text part but not completed due to the limited time.
+
+(This ideas came from a personal talk with a data scientist in Mckinsey, who informed Ming how the text data process and machine learning algorithms helps the traders in GS)
+
+1. Web Scrape the news and reports related to some products, let's say, Iron, from the mainstream media like the Wall Street Journal and completed the sentimental analysis for the text data.
+
+2. Load the data traded from countries to countries of those above products, as well as the stock price of some main companies in that industry and perform the time-series analysis based on a much shorter time interval, let's say, 2 weeks, than years.
+
+3. combine the more detailed analysis part with the yearly-analysis part, and let's see how the news, reports and policy files will influence the daily trade and the annual trade.
+
+This is really a large-workload task so we didn't finish it due to the limited time and limited data skills. But it sounds really interesting and the whole trade numbers can be cut into more and more smaller time interval, from years to quarters, to weeks, to days, to hours and to minutes. That sounds really nice but really needs time and skills to accomplish.
+
+## Macro-Economics is really COMPLICATED
+Both two contributors are not so familiar with the macro-enonomics field, so we just select the variables by some short essays, blogs or even online news. The data source still hides many secrets to be digged.
+
+\newpage
+# References
+
+1. Beautiful Data: The Stories Behind Elegant Data Solutions by Toby Segaran
+
+2. [How trade has influence the world](http://insights.som.yale.edu/insights/how-has-trade-shaped-the-world), by Yale University
+
+3. [Storytelling with Data: A Data Visualization Guide for Business Professionals](http://www.storytellingwithdata.com/book/)
+
+4. [Spark R Documentation](https://spark.apache.org/docs/latest/sparkr.html)
+
+5. [tm Documentation](https://www.rdocumentation.org/packages/tm/versions/0.7-2)
+
+6. [Shiny App Development Tutorial](shiny.rstudio.com/tutorial/) 
+
+7. [HTML Tutorial by Udemy](https://blog.udemy.com/learn-html-learn-the-foundations-of-html/)
+
+8. [Google Maps API for R](http://derekyves.github.io/2016/07/24/placement-pkg.html)
+
+9. [Leaflet Documentation](http://leafletjs.com/)
+
+10. [NLTK Documentation](http://www.nltk.org/)
+
+11. [Long-only Trading Strategy with NLP derived Social Media Sentiment](https://www.quantopian.com/posts/long-only-trading-strategy-with-nlp-derived-social-media-sentiment-tear-sheet-attached)
+
+12. [Joseph Wang's Quora Page](https://www.quora.com/profile/Joseph-Wang-9)
+
+13. Hartigan, J. A. and Wong, M. A. (1979). A K-means clustering algorithm. Applied Statistics 28, 100–108.
+
+14. Applied Linear Regression Models, by Nelson Li, 2004
+
+15. [Rmarkdown Documentation](http://rmarkdown.rstudio.com/pdf_document_format.html#figure_options)
+
+16. [Handling and Processing Strings in R, by Gaston Sanchez](http://www.gastonsanchez.com/Handling_and_Processing_Strings_in_R.pdf)
+
+17. [Pattern Recognition and Machine Learning](http://www.springer.com/us/book/9780387310732)
+
+18. [Revealjs Package Documentation](https://github.com/rstudio/revealjs)
+
+19. [Macroeconomics (9th Edition 2016) by N. Gregory Mankiw](https://katorrentz.com/macroeconomics-9th-edition-2016-by-n-gregory-mankiw-pdf-dr-soc-t12490875.html)
+
+20. [International Economics 10th edition by Krugman](https://www.saylor.org/site/textbooks/International%20Economics%20-%20Theory%20and%20Policy.pdf)
+

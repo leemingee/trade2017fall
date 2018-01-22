@@ -1,0 +1,623 @@
+---
+title: "Project NeverGiveUp"
+author: "Jinhan & Ming"
+date: "12/8/2017"
+output: 
+  revealjs::revealjs_presentation:
+     transition: fade
+     highlight: pygments
+     center: true
+     reveal_options:
+      slideNumber: true
+      previewLinks: true
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+opts_chunk$set(echo = TRUE, eval = TRUE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=0), tidy = TRUE)
+Sys.setenv(TZ="America/New_York")
+```
+```{r libraries,include=FALSE}
+library(prettydoc)
+library(data.table)
+library(plyr)
+library(dplyr)
+library(Hmisc)
+library(DT)
+library(scales)
+library(noncensus)
+library(stringr)
+library(pipeR)
+library(pdftools)
+library(NLP)
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(spacyr)
+library(revealjs)
+
+options(DT.options = list(pageLength = 5))
+```
+
+```{r functions, include=FALSE}
+# round.numer
+round.numerics <- function(x, digits) { 
+  if (is.numeric(x)) {
+     x <- round(x = x, digits = digits)
+  }
+  return(x) 
+}
+# mean(x, na.rm=TRUE)
+narm.mean <- function(x) { 
+  return(mean(x,na.rm=TRUE))
+}
+# asnumeric
+asnumeric <- function(x){
+  if(is.numeric(x)){
+    x <- as.numeric(x)
+  }
+  return(x)
+}
+
+# logistic regression
+logistic.regression.summary <- function(glm.mod, digits = 3) {
+  glm.coefs <- as.data.table(summary(glm.mod)$coefficients, keep.rownames = TRUE) 
+  alpha = 0.05
+  z <- qnorm(p = 1 - alpha/2, mean = 0, sd = 1)
+  glm.coefs[, `:=`(Odds.Ratio, exp(Estimate))]
+  glm.coefs[, `:=`(OR.Lower.95, exp(Estimate - z * `Std. Error`))] 
+  glm.coefs[, `:=`(OR.Upper.95, exp(Estimate + z * `Std. Error`))] 
+  setnames(x = glm.coefs, old = c("rn", "Pr(>|z|)"), new = c("Variable", 
+    "p.value"))
+  setcolorder(x = glm.coefs, neworder = c("Variable", "Estimate", "Odds.Ratio", "Std. Error", "z value", "p.value", "OR.Lower.95", "OR.Upper.95"))
+  return(glm.coefs[])
+}
+
+# linear regression
+linear.regression.summary <- function(lm.mod, digits = 3) { 
+  lm.coefs <- as.data.table(summary(lm.mod)$coefficients, keep.rownames = TRUE) 
+  alpha = 0.05
+  z <- qnorm(p = 1 - alpha/2, mean = 0, sd = 1)
+  lm.coefs[, `:=`(Coef.Lower.95, Estimate - z * `Std. Error`)] 
+  lm.coefs[, `:=`(Coef.Upper.95, Estimate + z * `Std. Error`)] 
+  setnames(x = lm.coefs, old = c("rn", "Pr(>|t|)"), new = c("Variable", 
+    "p.value"))
+  setcolorder(x = lm.coefs, neworder = c("Variable", "Estimate", "Std. Error", "t value","p.value", "Coef.Lower.95", "Coef.Upper.95"))
+  return(lm.coefs)
+}
+
+# reduce formula
+num.unique <- function(x){
+  unique.values <- unique(x)
+  unique.values <- unique.values[!is.na(unique.values)]
+  len <- length(unique.values)
+  return(len)
+}
+
+min.above <- function(x, threshold, na.rm = TRUE){
+  the.min <- min(x, na.rm = na.rm)
+  if(the.min > threshold){
+    return(TRUE)
+  }
+  else{
+    return(FALSE)
+  }
+}
+
+reduce.formula <- function(dat, the.initial.formula, outcome.category.threshold = 2){
+   dat <- as.data.table(dat)
+
+   the.sides <- strsplit(x = the.initial.formula, split = "~")[[1]]
+   the.outcome <- trimws(the.sides[1], which = "both")
+   the.predictors.untrimmed <- strsplit(x = the.sides[2], split = "+", fixed = TRUE)[[1]]
+   the.predictors <- trimws(x = the.predictors.untrimmed, which = "both")
+
+   total.unique <- dat[, lapply(X = .SD, FUN = "num.unique"), .SDcols = the.predictors]
+   includes.variation <- total.unique[, .SD > 1, .SDcols = the.predictors]
+
+   num.unique.outcomes <- dat[, length(unique(get(the.outcome)))]
+
+   if(num.unique.outcomes <= outcome.category.threshold){
+     total.unique.segmented <- dat[, lapply(X = .SD, FUN = "num.unique"), .SDcols = the.predictors, by = the.outcome]
+     measured.in.all.segments <- total.unique.segmented[, lapply(X = .SD, FUN = "min.above", threshold = 0), .SDcols = the.predictors]
+   }
+   else{
+     measured.in.all.segments = pmax(TRUE, includes.variation)
+   }
+   
+   meets.criteria <- pmin(includes.variation, measured.in.all.segments)
+   included.variables <- as.data.table(x = t(meets.criteria), keep.rownames = TRUE)
+   setnames(x = included.variables, old = names(included.variables), new = c("variable", "include"))
+
+   rhs <- paste(included.variables[include == TRUE, variable], collapse = " + ")
+   the.formula <- sprintf("%s ~ %s", the.sides[1], rhs)
+   return(the.formula)
+}
+
+# Model Fitting Function
+fit.model <- function(dat, the.initial.formula, model.type, digits = 3) {
+    the.formula <- reduce.formula(dat = dat, the.initial.formula = the.initial.formula)
+    if (model.type == "logistic") {
+        mod <- glm(formula = the.formula, family = "binomial", data = dat)
+        mod.summary <- logistic.regression.summary(glm.mod = mod, digits = digits)
+    }
+    if (model.type == "linear") {
+        mod <- lm(formula = the.formula, data = dat) 
+        mod.summary <- linear.regression.summary(lm.mod = mod, digits = digits)
+    }
+    mod.summary.rounded <- mod.summary[, lapply(X = .SD, FUN = "round.numerics", digits = digits)] 
+    return(mod.summary.rounded)
+}
+
+
+```
+# Never Give Up 
+
+
+## Never Give Up 
+
+We are Never Give Up team, and we truly are.
+
+- Team memeber:Jinhan Cheng, Ming Li
+
+
+## TOPIC: Trade Around the World
+
+- Trade
+
+- Index
+
+```{r read_csv, include=FALSE}
+dat1 <- fread(input="sitc315presdigit.csv", integer64 = "numeric", verbose = FALSE)
+dat2 <- fread(input="sitc39614digit.csv", integer64 = "numeric", verbose = FALSE)
+dat3 <- rbind(dat1,dat2)
+```
+
+## Very Raw Data
+
+- Lots of columns, and we only deal with total import and export
+
+```{r raw_data, echo = TRUE}
+colnames(dat3)
+```
+
+## Annual Reports from WTO
+
+```{r wto reports, echo = TRUE}
+rp.files <- list.files(pattern = "pdf$")
+rp.files
+```
+
+## Simple Text Miming
+
+```{r text, echo = TRUE}
+read <- readPDF(control = list(text = "-layout"))
+text <- Corpus(URISource(rp.files), readerControl = list(reader = read))
+text.p <- TermDocumentMatrix(text,control = list(removePunctuation = TRUE,stopwords = TRUE, tolower = TRUE, stemming = TRUE, removeNumbers = TRUE, bounds = list(local = c(3, Inf)))) 
+ft <- findFreqTerms(text.p, highfreq = Inf)
+
+goods <- unique(dat3$sitc_sdesc)
+goods <- tolower(goods)
+goods.p <- sprintf(" %s ", paste(goods, collapse = " "))
+goods.p <- gsub("\\d"," ",goods.p)
+goods.p <- gsub(pattern = "[[:punct:]]", replacement = "", goods.p)
+goods.p <- unique(unlist(strsplit(goods.p,split=" ")))
+goods.p <- goods.p[which(nchar(goods.p) >= 3)]
+goods.p <- sort(goods.p[which(goods.p %in% ft)])
+
+text.ft <- as.matrix(text.p[goods.p, ])
+text.ft <- cbind(rownames(text.ft),as.data.table(text.ft))
+colnames(text.ft)[1] <- "Term"
+text.ft$Frequence <- rowSums(text.ft[,2:12,by="Term"])
+text.c <- text.ft[,c(1,13)]
+text.cleaned <- c("paper","oil","food","fuel","water","fish","plant","gas","steel","household","metal","wood","iron","coal","petroleum","footwear","ore","appeal","gold","meat","fruit","aircraft","leather","sugar","cotton","railway","wheat","rice","motor","glutin","cocoa","copper","film","corn","rubber","tobacco","nickel","tea","headgear","milk","cork","silver","cereal","honey","plywood","zinc","platinum","sand","flour")
+rm(text.ft)
+text.cleaned <- text.c[text.c$Term %in% text.cleaned,]
+text.cleaned <- setorderv(text.cleaned, "Frequence", -1)
+```
+
+## Frequence
+
+```{r target, echo = TRUE}
+datatable(text.cleaned)
+```
+
+## A Coarse Accumulated WordCloud for 2006-2017
+
+- Not precise enough because it contains some words that are useless
+
+- Let's take a look at shiny to see more precise trend in these years
+
+```{r simple wordcloud, echo = TRUE}
+wordcloud(text.cleaned$Term, text.cleaned$Frequence, random.order=FALSE, scale= c(5, 0.5), colors = brewer.pal(8, "Dark2"))
+```
+# Key Words
+
+## Key Words
+
+- Manually drag them from the wordcloud
+
+- Use also some Brain Storm
+
+- Two versions of key words, the full names and the short names(which are easy to grepl())
+
+```{r keywords, include = FALSE}
+cloth <- c("SILK TEXTILE FIBERS","COTTON TEXTILE FIBERS")
+cereal <- c("WHEAT AND MESLIN, UNMILLED","RICE","BARLEY, UNMILLED","MAIZE (NOT INCLUDING SWEET CORN) UNMILLED","CEREALS, EXCEPT WHEAT, RICE, BARLEY, MAIZE")
+drinks <- c("COFFEE AND COFFEE SUBSTITUTES","COCOA","TEA AND MATE","NONALCOHOLIC BEVERAGES","ALCOHOLIC BEVERAGES","MILK, CREAM, MILK PRODUCTS EXCEPT BUTTER OR CHEES","FRUIT/VEGETABLE JUICES, UNFERMENTED")
+keywords <- c(cloth,cereal,drinks)
+products <- unique(dat3[,.(product=unique(sitc_sdesc)),by=SITC])
+s.cloth <- c("Silk","Cotton")
+s.cereal <- c("Wheat","Rice","Barley","Maize","Other.Cereals") 
+s.drinks <- c("Coffee","Cocoa","Tea","Soft.Drinks","Alcohol","Milk","Juices")
+s.keywords <- c(s.cloth,s.cereal,s.drinks)
+#products$product[grepl(paste(keywords,collapse="|"),products$product)]
+```
+```{r keywords show, echo = TRUE}
+keywords
+s.keywords
+```
+
+# Melt Data and Clean them
+
+```{r melt_data, include = FALSE}
+keydat <- dat3[sitc_sdesc %in% keywords]
+# simplify products'names
+for (i in 1:length(keywords)){
+    keydat$sitc_sdesc[keydat$sitc_sdesc==keywords[i]] <- s.keywords[i]
+}
+# delete CIF
+CIF <- colnames(keydat)[grep("CIF",colnames(keydat))]
+keydat[,CIF] <- NULL
+keydat[,c("SITC","CTY_CODE")] <- NULL
+# change colnames
+colnames(keydat) <- gsub("FASValueBasis",".",colnames(keydat))
+colnames(keydat) <- gsub("GenImportsCustomsValBasis","Imports.",colnames(keydat))
+colnames(keydat) <- gsub("YtdDec","Total",colnames(keydat))
+setnames(x = keydat, old = "sitc_sdesc", new = "Product")
+```
+```{r subdat, include =FALSE}
+export.total.keydat <- keydat[,c("Year","Product","Country","Exports.Total")]
+export.total.keydat[,':='(Type,"Export")]
+setcolorder(x = export.total.keydat, neworder = c("Country", "Year", "Product", "Exports.Total","Type"))
+import.total.keydat <- keydat[,c("Year","Product","Country","Imports.Total")]
+import.total.keydat[,':='(Type,"Import")]
+setcolorder(x = import.total.keydat, neworder = c("Country", "Year", "Product", "Imports.Total","Type"))
+
+#r export_total
+for (i in 1:length(s.keywords)){
+    export.total.keydat[Product==s.keywords[i],':='(s.keywords[i],Exports.Total)]
+}
+#order by country and year
+setorderv(x=export.total.keydat, cols=c("Country","Year"))
+export.total.keydat <- export.total.keydat[,-c("Product","Exports.Total")]
+#r clean year
+n.export.total.keydat <- export.total.keydat[, lapply(X = .SD, FUN = "narm.mean"), .SDcols =s.keywords, by=c("Country","Year","Type")]
+# clean NAs
+n.export.total.keydat[is.na(n.export.total.keydat)==TRUE] <- 0
+
+# import_total
+for (i in 1:length(s.keywords)){
+    import.total.keydat[Product==s.keywords[i],':='(s.keywords[i],Imports.Total)]
+}
+#order by country and year
+setorderv(x=import.total.keydat, cols=c("Country","Year"))
+import.total.keydat <- import.total.keydat[,-c("Product","Imports.Total")]
+#r clean year
+n.import.total.keydat <- import.total.keydat[, lapply(X = .SD, FUN = "narm.mean"), .SDcols =s.keywords, by=c("Country","Year","Type")]
+# clean NAs
+n.import.total.keydat[is.na(n.import.total.keydat)==TRUE] <- 0
+
+# export&import_total
+total.keydat <- rbind(n.export.total.keydat,n.import.total.keydat)
+rm(export.total.keydat,import.total.keydat,n.export.total.keydat,n.import.total.keydat)
+# rm problem country
+total.keydat <- total.keydat[Country!="4799" & Country!="4802"]
+```
+
+## Adding Population Growth
+
+- We already have these columns, and we add other variables from now on (including country code)
+
+- The name of a country may be written in different way, but all point to the same country code!
+
+- But also, we drop some data because some country don't have their corresponding code.
+
+```{r total.keydat, echo = TRUE}
+colnames(total.keydat)
+```
+```{r population_growth, include = FALSE}
+dat4 <- fread(input="Population.Growth.csv")
+setorderv(dat4,"Country Name")
+dat5 <- fread(input="Region_IncomeGroup1.csv")
+setorderv(dat5,"TableName")
+dat4 <- dat4[`Country Code` != dat4$`Country Code`[which(dat4$`Country Code` %nin% dat5$`Country Code`)]]
+# country code from world bank
+Country <- dat3[,.(Country=unique(Country))]
+Country.Code <- rbind(dat4[,.(Country=`Country Name`),by="Country Code"],dat5[,.(Country=TableName),by="Country Code"])
+Country.Code <- Country.Code[,.(Country=unique(Country)),by="Country Code"]
+# add county code to Country
+Country[Country %in% Country.Code$`Country`,`:=`("Country Code", Country.Code$`Country Code`)]
+# find country
+add1 <- Country$Country[grepl(paste(Country.Code$Country[Country.Code$Country %nin% Country$Country],collapse="|"),Country$Country)]
+add2 <- Country.Code$Country[grepl(paste(Country$Country[Country$Country %nin% Country.Code$Country],collapse="|"),Country.Code$Country)]
+add11 <- Country.Code[,grep(Country,add1)!=0,by=Country]
+add11 <- Country.Code[Country %in% add11$Country,`Country Code`,by=Country]
+add11 <- add11[,':='(Country1,add1)]
+Country[Country %in% add11$Country1, ':='("Country Code",add11$`Country Code`)]
+add22 <- Country[Country %nin% Country.Code$Country,grep(Country,add2)!=0,by=Country]
+add2 <- Country.Code[Country %in% add2,`Country Code`,by=Country]
+add22 <- add2[,':='(Country1,add22$Country)]
+Country[Country %in% add22$Country1, ':='("Country Code",add22$`Country Code`)]
+# add country code for total.keydat
+total.keydat <- merge(total.keydat,Country,by="Country",all = FALSE)
+dat5[dat5==""] <- NA
+total.keydat <- merge(total.keydat,dat5[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Region","IncomeGroup")],by="Country Code",all = FALSE)
+# clean spare data
+rm(add1,add2,add11,add22)
+```
+
+```{r add population growth into total.keydat, include = FALSE}
+# choose years in dat4 and merge
+dat4 <- dat4[,c("Country Name","Country Code","1996":"2016")]
+rdat4 <- melt(data=dat4, id.vars=c("Country Name","Country Code"), variable.name="Year", value.name="Population.Growth", value.factor=FALSE)
+rdat4[,Year := as.numeric(as.character(Year))]
+rdat4[,Population.Growth := as.numeric(Population.Growth)]
+rdat4[`Country Code`=="USA",':='(P.G.U.S, Population.Growth), by=Year]
+rdat4[,P.G.U.S := mean(P.G.U.S, na.rm = TRUE), by=Year]
+total.keydat <- merge(total.keydat,rdat4[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","Population.Growth","P.G.U.S")],by=c("Country Code","Year"), all=FALSE)
+setorderv(total.keydat,c("Country","Year"))
+```
+
+## Adding other Variables
+
+- Undernourishment (for example)
+
+- Overweight
+
+- Death caused by nourishment condition
+
+- Income_male, Income_female, GDP per person
+
+```{r introduce unnourishment,overweight,death,Income_Gender,GDP_per, echo = TRUE}
+undernourishment <- fread(input="Undernourishment.csv")
+overweight <- fread(input="Overweight.csv")
+death <- fread(input="Cause_of_Death_by.csv")
+income_male <- fread(input="Income_Male.csv")
+income_female <- fread(input="Income_Female.csv")
+gdp_p <- fread(input="GDP_Per_Person.csv")
+```
+```{r undernourishment, echo =TRUE}
+# choose data from 1996-2016
+undernourishment <- undernourishment[,c("Country Code","1996":"2016")]
+undernourishment <- melt(data=undernourishment, id.vars="Country Code", variable.name="Year", value.name="Undernourishment", value.factor=FALSE)
+undernourishment[,Year := as.numeric(as.character(Year))]
+undernourishment[,Undernourishment := as.numeric(Undernourishment)]
+undernourishment[`Country Code`=="USA",':='(U.N.U.S, Undernourishment), by=Year]
+undernourishment[,U.N.U.S := mean(U.N.U.S, na.rm = TRUE), by=Year]
+```
+```{r other, include = FALSE}
+overweight <- overweight[,c("Country Code","1996":"2016")]
+overweight <- melt(data=overweight, id.vars="Country Code", variable.name="Year", value.name="Overweight", value.factor=FALSE)
+overweight[,Year := as.numeric(as.character(Year))]
+overweight[,Overweight := as.numeric(Overweight)]
+overweight[`Country Code`=="USA",':='(O.W.U.S, Overweight), by=Year]
+overweight[,O.W.U.S := mean(O.W.U.S, na.rm = TRUE), by=Year]
+
+death <- death[,c("Country Code","1996":"2016")]
+death <- melt(data=death, id.vars="Country Code", variable.name="Year", value.name="Death", value.factor=FALSE)
+death[,Year := as.numeric(as.character(Year))]
+death[,Death := as.numeric(Death)]
+death[`Country Code`=="USA",':='(D.U.S, Death), by=Year]
+death[,D.U.S := mean(D.U.S, na.rm = TRUE), by=Year]
+
+income_male <- income_male[,c("Country Code","1996":"2016")]
+income_male <- melt(data=income_male, id.vars="Country Code", variable.name="Year", value.name="Income_Male", value.factor=FALSE)
+income_male[,Year := as.numeric(as.character(Year))]
+income_male[,Income_Male := as.numeric(Income_Male)]
+income_male[`Country Code`=="USA",':='(I.M.U.S, Income_Male), by=Year]
+income_male[,I.M.U.S := mean(I.M.U.S, na.rm = TRUE), by=Year]
+
+income_female <- income_female[,c("Country Code","1996":"2016")]
+income_female <- melt(data=income_female, id.vars="Country Code", variable.name="Year", value.name="Income_Female", value.factor=FALSE)
+income_female[,Year := as.numeric(as.character(Year))]
+income_female[,Income_Female := as.numeric(Income_Female)]
+income_female[`Country Code`=="USA",':='(I.F.U.S, Income_Female), by=Year]
+income_female[,I.F.U.S := mean(I.F.U.S, na.rm = TRUE), by=Year]
+
+gdp_p <- gdp_p[,c("Country Code","1996":"2016")]
+gdp_p <- melt(data=gdp_p, id.vars="Country Code", variable.name="Year", value.name="GDP.per.person", value.factor=FALSE)
+gdp_p[,Year := as.numeric(as.character(Year))]
+gdp_p[,GDP.per.person := as.numeric(GDP.per.person)]
+gdp_p[`Country Code`=="USA",':='(Gdp.P.U.S, GDP.per.person), by=Year]
+gdp_p[,Gdp.P.U.S := mean(Gdp.P.U.S, na.rm = TRUE), by=Year]
+```
+
+## Merging
+
+```{r merge and set order, echo = TRUE}
+total.keydat <- merge(total.keydat,undernourishment[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","Undernourishment","U.N.U.S")],by=c("Country Code","Year"), all=FALSE)
+total.keydat <- merge(total.keydat,overweight[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","Overweight","O.W.U.S")],by=c("Country Code","Year"), all=FALSE)
+total.keydat <- merge(total.keydat,death[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","Death","D.U.S")],by=c("Country Code","Year"), all=FALSE)
+total.keydat <- merge(total.keydat,income_male[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","Income_Male","I.M.U.S")],by=c("Country Code","Year"), all=FALSE)
+total.keydat <- merge(total.keydat,income_female[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","Income_Female","I.F.U.S")],by=c("Country Code","Year"), all=FALSE)
+total.keydat <- merge(total.keydat,gdp_p[`Country Code` %in% unique(total.keydat$`Country Code`),c("Country Code","Year","GDP.per.person","Gdp.P.U.S")],by=c("Country Code","Year"), all=FALSE)
+setorderv(total.keydat,c("Country","Year"))
+
+setcolorder(x = total.keydat, neworder = c("Country Code", "Year", "Country", "Region", "IncomeGroup", "Type", "Silk", "Cotton", "Wheat", "Rice", "Barley", "Maize", "Other.Cereals", "Coffee", "Cocoa", "Tea", "Soft.Drinks", "Alcohol", "Milk", "Juices", "Population.Growth", "Undernourishment", "Overweight", "Death", "Income_Male", "Income_Female", "GDP.per.person", "P.G.U.S", "U.N.U.S", "O.W.U.S", "D.U.S", "I.M.U.S", "I.F.U.S", "Gdp.P.U.S"))
+```
+
+# Modeling
+
+## Using Ratio rather than Real Amount
+
+- Suppose amount of Import and Export equals to what have been consumed in reality. 
+
+- We have 3 product groups, cloth, cereal and drinks, because the amount of the trade is enormous, we use ratio instead of real amount here. We want to see what the changes of ratios between products could affect the indexs.
+
+```{r ratio.keydat, include =FALSE}
+ratio.keydat <- total.keydat
+ratio.keydat[,':='(sum.cloth,Silk+Cotton)]
+ratio.keydat[,':='(sum.cereal,Wheat+Rice+Barley+Maize+Other.Cereals)]
+ratio.keydat[,':='(sum.drinks,Coffee+Cocoa+Tea+Soft.Drinks+Alcohol+Milk+Juices)]
+ratio.keydat[,':='(Silk,Silk/sum.cloth)]
+ratio.keydat[,':='(Cotton,Cotton/sum.cloth)]
+ratio.keydat[,':='(Wheat,Wheat/sum.cereal)]
+ratio.keydat[,':='(Rice,Rice/sum.cereal)]
+ratio.keydat[,':='(Barley,Barley/sum.cereal)]
+ratio.keydat[,':='(Maize,Maize/sum.cereal)]
+ratio.keydat[,':='(Other.Cereals,Other.Cereals/sum.cereal)]
+ratio.keydat[,':='(Coffee,Coffee/sum.drinks)]
+ratio.keydat[,':='(Cocoa,Cocoa/sum.drinks)]
+ratio.keydat[,':='(Tea,Tea/sum.drinks)]
+ratio.keydat[,':='(Soft.Drinks,Soft.Drinks/sum.drinks)]
+ratio.keydat[,':='(Alcohol,Alcohol/sum.drinks)]
+ratio.keydat[,':='(Milk,Milk/sum.drinks)]
+ratio.keydat[,':='(Juices,Juices/sum.drinks)]
+```
+
+## Model Overweight (Export from US)
+
+- One is more likely to be overweight, if he or she drinks a lot Cocoa and Tea?(maybe drink with lots of sugar)
+
+- Now let's take a look at shiny
+
+```{r model Overweight~Region+IncomeGroup+Wheat+Rice+Barley+Maize+Other.Cereals+Coffee+Cocoa+Tea+Soft.Drinks+Alcohol+Milk+Juices   (Export from US), echo =TRUE}
+overweight.formula <- " Overweight ~ IncomeGroup + Region + Wheat + Rice + Barley + Maize + Other.Cereals + Coffee + Cocoa + Tea + Soft.Drinks + Alcohol + Milk + Juices"
+overweight.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = overweight.formula, model.type = "linear")
+datatable(overweight.model)
+```
+
+## Model Coffee (Export from US)
+
+- If you are a man, you may buy less coffee with increasing ratio of salaried male.
+
+- See Shiny
+
+```{r model Coffee~Region+IncomeGroup+GDP.p+Income_gender  (Export from US), echo = TRUE}
+Coffee.formula <- " Coffee ~ IncomeGroup + Region + GDP.per.person + Income_Female + Income_Male"
+Coffee.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = Coffee.formula, model.type = "linear")
+datatable(Coffee.model)
+```
+
+## Model Tea (Export from US)
+
+- If you are a man, you may buy more tea with increaing wage
+
+- See Shiny
+
+```{r model Tea~Region+IncomeGroup+GDP.p+Income_gender  (Export from US), echo = TRUE}
+Tea.formula <- " Tea ~ IncomeGroup + Region + GDP.per.person + Income_Female + Income_Male"
+Tea.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = Tea.formula, model.type = "linear")
+datatable(Tea.model)
+```
+
+## Model Cocoa (Export from US)
+
+```{r model Cocoa~Region+IncomeGroup+GDP.p+Income_gender  (Export from US), echo = TRUE}
+Cocoa.formula <- " Cocoa ~ IncomeGroup + Region + GDP.per.person + Income_Female + Income_Male"
+Cocoa.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = Cocoa.formula, model.type = "linear")
+datatable(Cocoa.model)
+```
+
+## Model Soft Drink (Export from US)
+
+```{r model Soft.Drinks~Region+IncomeGroup+GDP.p+Incomer_gender (Export from US), echo = TRUE}
+Soft.Drinks.formula <- " Soft.Drinks ~ IncomeGroup + Region + GDP.per.person + Income_Female + Income_Male"
+Soft.Drinks.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = Soft.Drinks.formula, model.type = "linear")
+datatable(Soft.Drinks.model)
+```
+
+## Model Alcohol (Export from US)
+
+```{r model Alcohol~Region+IncomeGroup+GDP.p+Incomer_gender   (Export from US), echo = TRUE}
+Alcohol.formula <- " Alcohol ~ IncomeGroup + Region + GDP.per.person + Income_Female + Income_Male"
+Alcohol.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = Alcohol.formula, model.type = "linear")
+datatable(Alcohol.model)
+```
+
+## Model Milk (Export from US)
+
+```{r model Milk~Region+IncomeGroup+GDP.p+Income_gender  (Export from US), echo = TRUE}
+Milk.formula <- " Milk ~ IncomeGroup + Region + GDP.per.person + Income_Female + Income_Male"
+Milk.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = Milk.formula, model.type = "linear")
+datatable(Milk.model)
+```
+
+## Model Juices (Export from US)
+
+```{r model Juices~Region+IncomeGroup+GDP.p+Incomer_gender   (Export from US), echo = TRUE}
+Juices.formula <- " Juices ~ IncomeGroup + Region + GDP.per.person + Income_Female + Income_Male"
+Juices.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = Juices.formula, model.type = "linear")
+datatable(Juices.model)
+```
+
+## Model Overweight (Import to US)
+
+```{r model Overweight~Region+IncomeGroup+Wheat+Rice+Barley+Maize+Other.Cereals+Coffee+Cocoa+Tea+Soft.Drinks+Alcohol+Milk+Juices   (Import to US), echo = TRUE}
+overweight.us.formula <- " O.W.U.S ~ Wheat + Rice + Barley + Maize + Other.Cereals + Coffee + Cocoa + Tea + Soft.Drinks + Alcohol + Milk + Juices"
+overweight.us.model <- fit.model(dat = ratio.keydat[Type=="Import",], the.initial.formula = overweight.us.formula, model.type = "linear")
+datatable(overweight.us.model)
+```
+
+## Model Death (Export from US)
+
+- opposite to intuition, coffee and tea makes people opposed to death
+
+```{r model Death~Region+IncomeGroup+Coffee+Cocoa+Tea+Soft.Drinks+Alcohol+Milk+Juices (import&export)}
+death.formula <- "Death ~ Coffee + Cocoa + Tea + Soft.Drinks + Alcohol + Milk + Juices"
+death.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = death.formula, model.type = "linear")
+datatable(death.model)
+```
+
+## Model Undernourishment (Export from US)
+
+- less Barley in the structure of one's diet will prevent undernourishment?
+
+- Let's see shiny of the trade of barley
+
+```{r model Undernourishment~Region+Income+Wheat+Rice+Barley+Maize+Other.Cereals (export from US)}
+undernourishment.formula <- "Undernourishment ~ IncomeGroup + Region + Wheat + Rice +Barley + Maize + Other.Cereals"
+undernourishment.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = undernourishment.formula, model.type = "linear")
+datatable(undernourishment.model)
+```
+
+## Model Silk (Export from US)
+
+- Male are more likely to buy silk product with increaing ratio of salaried male
+
+```{r model SilkvsCotton~Region+IncomeGroup+GDP.per.person+Income_Female+Income_Male (Export from US) }
+Silk.formula <- "Silk ~ IncomeGroup + Region + GDP.per.person + Income_Female + Income_Male"
+Silk.model <- fit.model(dat = ratio.keydat[Type=="Export",], the.initial.formula = Silk.formula, model.type = "linear")
+datatable(Silk.model)
+```
+
+## Model Silk (Import to US)
+
+- Male are more likely to buy silk product with increaing ratio of salaried male!
+
+```{r model SilkvsCotton~Region+IncomeGroup+GDP.per.person+Income_Female+Income_Male (Import to US) }
+Silk.us.formula <- "Silk ~ Gdp.P.U.S + I.M.U.S + I.F.U.S"
+Silk.us.model <- fit.model(dat = ratio.keydat[Type=="Import",], the.initial.formula = Silk.us.formula, model.type = "linear")
+datatable(Silk.us.model)
+```
+
+# Shiny
+
+## Clustering
+
+- See Shiny for more interesting result :)
+
+## Problems Underneath
+
+- We use ratio rather then amount, and we don't know how much US products contribute to the total amount of the consumption of a country
+
+- Also, for precision, using country as "id" is not as good as using real person, and we lack enough data!
+
+- Index are not only concerned with index above, there are more hidden variables that we need to find.
+
+## Thank You!
+
+- NeverGiveUp Team
+
+- Jinhan Cheng, Ming li
